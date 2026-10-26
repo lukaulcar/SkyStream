@@ -119,12 +119,12 @@ ORDER BY (icao, timestamp)
 SETTINGS index_granularity = 8192;
 ```
 
-### Why this schema? (~25 GB / year)
+### Why this schema? (~48 GB / year)
 
 Logging global flight traffic every minute (`CLICKHOUSE_SAVE_INTERVAL=1m`) with an average of 15,000 aircraft in the air yields:
 - 15,000 planes × 1,440 minutes/day × 365 days = **~7.88 billion rows per year**.
 
-Storing raw uncompressed rows would burn hundreds of gigabytes in months. With this schema and ClickHouse column codecs, a full year takes **~25 GB on disk** (~3.2 bytes per aircraft position).
+Storing raw uncompressed rows would burn hundreds of gigabytes in months. With this schema and ClickHouse column codecs, a full year takes **~48 GB on disk** (~6.05 bytes per aircraft position).
 
 Here is how it's compressed:
 
