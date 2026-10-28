@@ -90,16 +90,12 @@ func FetchGlobalSnapshot(ctx context.Context, client *http.Client, endpoint stri
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 
-	decompressed, err := DecompressZstd(compressedData)
+	decompressed, err := zstdDecoder.DecodeAll(compressedData, nil)
 	if err != nil {
 		return nil, fmt.Errorf("zstd decompression: %w", err)
 	}
 
 	return ParseBinCraft(decompressed)
-}
-
-func DecompressZstd(src []byte) ([]byte, error) {
-	return zstdDecoder.DecodeAll(src, nil)
 }
 
 func ParseBinCraft(data []byte) (*GlobeSnapshot, error) {
@@ -128,9 +124,9 @@ func ParseBinCraft(data []byte) (*GlobeSnapshot, error) {
 		acBuf := data[off : off+stride]
 		var ac Aircraft
 
-		s32_0 := int32(binary.LittleEndian.Uint32(acBuf[0:4]))
-		hasTilde := (s32_0 & (1 << 24)) != 0
-		hexVal := s32_0 & 0x00FFFFFF
+		s320 := int32(binary.LittleEndian.Uint32(acBuf[0:4]))
+		hasTilde := (s320 & (1 << 24)) != 0
+		hexVal := s320 & 0x00FFFFFF
 		hexStr := fmt.Sprintf("%06x", hexVal)
 		if hasTilde {
 			hexStr = "~" + hexStr
@@ -138,11 +134,11 @@ func ParseBinCraft(data []byte) (*GlobeSnapshot, error) {
 		ac.Hex = hexStr
 
 		if binCraftVersion >= 20240218 {
-			s32_1 := int32(binary.LittleEndian.Uint32(acBuf[4:8]))
-			ac.Seen = float64(s32_1) / 10.0
+			s321 := int32(binary.LittleEndian.Uint32(acBuf[4:8]))
+			ac.Seen = float64(s321) / 10.0
 		} else {
-			u16_3 := binary.LittleEndian.Uint16(acBuf[6:8])
-			ac.Seen = float64(u16_3) / 10.0
+			u163 := binary.LittleEndian.Uint16(acBuf[6:8])
+			ac.Seen = float64(u163) / 10.0
 		}
 
 		lonRaw := float64(int32(binary.LittleEndian.Uint32(acBuf[8:12]))) / 1e6
@@ -162,7 +158,7 @@ func ParseBinCraft(data []byte) (*GlobeSnapshot, error) {
 			ac.Emergency = em
 		}
 		airGround := acBuf[68] & 0x0F
-		ac.Ground = (airGround == 1)
+		ac.Ground = airGround == 1
 
 		flightStr := strings.TrimSpace(string(bytes.TrimRight(acBuf[78:86], "\x00 ")))
 		typeStr := strings.TrimSpace(string(bytes.TrimRight(acBuf[88:92], "\x00 ")))
@@ -180,7 +176,7 @@ func ParseBinCraft(data []byte) (*GlobeSnapshot, error) {
 		if (v73 & 8) == 0 {
 			ac.Flight = ""
 		}
-		if (v73 & 16) != 0 && !ac.Ground {
+		if (v73&16) != 0 && !ac.Ground {
 			ac.AltBaro = &altBaroRaw
 		}
 		if (v73 & 64) != 0 {
@@ -197,7 +193,7 @@ func ParseBinCraft(data []byte) (*GlobeSnapshot, error) {
 		if (v75 & 1) != 0 {
 			ac.VerticalRate = &baroRateRaw
 		}
-		if (v76 & 4) != 0 && squawkVal != 0 {
+		if (v76&4) != 0 && squawkVal != 0 {
 			ac.Squawk = fmt.Sprintf("%04x", squawkVal)
 		}
 

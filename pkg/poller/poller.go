@@ -18,18 +18,6 @@ type WebSocketStatus struct {
 	ActiveClients int  `json:"active_clients"`
 }
 
-type StatusResponse struct {
-	Status        string          `json:"status"`
-	UptimeSec     float64         `json:"uptime_sec"`
-	PollsCount    uint64          `json:"polls_count"`
-	LastFetch     time.Time       `json:"last_fetch,omitempty"`
-	AircraftCount int             `json:"aircraft_count"`
-	LastError     string          `json:"last_error,omitempty"`
-	FetchInterval string          `json:"fetch_interval"`
-	WebSocket     WebSocketStatus `json:"websocket"`
-	ClickHouse    db.DBStatus     `json:"clickhouse"`
-}
-
 type dbSaveJob struct {
 	snapshot *adsb.GlobeSnapshot
 	bucket   time.Time
@@ -41,12 +29,7 @@ type Poller struct {
 	db            *db.DB
 	fetchInterval time.Duration
 	httpClient    *http.Client
-	startTime     time.Time
 	mu            sync.RWMutex
-	lastFetch     time.Time
-	aircraftCount int
-	lastError     error
-	pollsCount    uint64
 	lastDbBucket  time.Time
 	dbQueue       chan dbSaveJob
 	wg            sync.WaitGroup
@@ -77,7 +60,6 @@ func NewPoller(cfg *config.Config, h *hub.Hub, d *db.DB) *Poller {
 		hub:           h,
 		db:            d,
 		fetchInterval: interval,
-		startTime:     time.Now(),
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -149,16 +131,11 @@ func (p *Poller) pollOnce(ctx context.Context) {
 	}
 
 	p.mu.Lock()
-	p.pollsCount++
 	if err != nil {
-		p.lastError = err
 		p.mu.Unlock()
 		log.Printf("fetch error: %v", err)
 		return
 	}
-	p.lastError = nil
-	p.lastFetch = time.Now()
-	p.aircraftCount = len(snapshot.Aircraft)
 	p.mu.Unlock()
 
 	if p.cfg.EnableWebSocket && p.hub != nil {
@@ -193,8 +170,11 @@ func (p *Poller) dbWorker(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case job := <-p.dbQueue:
-			saveCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		case job, ok := <-p.dbQueue:
+			if !ok {
+				return
+			}
+			saveCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 			savedCount, err := p.db.SaveSnapshot(saveCtx, job.snapshot, job.bucket)
 			cancel()
 			if err != nil {
@@ -204,49 +184,5 @@ func (p *Poller) dbWorker(ctx context.Context) {
 					savedCount, job.bucket.Format("15:04:00"), time.Now().Format("15:04:05"))
 			}
 		}
-	}
-}
-
-func (p *Poller) GetStatus() StatusResponse {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	statusStr := "ok"
-	errStr := ""
-	if p.lastError != nil {
-		errStr = p.lastError.Error()
-		if time.Since(p.lastFetch) > 30*time.Second {
-			statusStr = "error"
-		} else {
-			statusStr = "degraded"
-		}
-	} else if p.lastFetch.IsZero() {
-		statusStr = "initializing"
-	}
-
-	wsStatus := WebSocketStatus{
-		Enabled: p.cfg.EnableWebSocket,
-	}
-	if p.hub != nil {
-		wsStatus.ActiveClients = p.hub.ClientCount()
-	}
-
-	var chStatus db.DBStatus
-	if p.db != nil {
-		chStatus = p.db.GetStatus()
-	} else {
-		chStatus = db.DBStatus{Enabled: p.cfg.EnableClickHouse}
-	}
-
-	return StatusResponse{
-		Status:        statusStr,
-		UptimeSec:     time.Since(p.startTime).Seconds(),
-		PollsCount:    p.pollsCount,
-		LastFetch:     p.lastFetch,
-		AircraftCount: p.aircraftCount,
-		LastError:     errStr,
-		FetchInterval: p.fetchInterval.String(),
-		WebSocket:     wsStatus,
-		ClickHouse:    chStatus,
 	}
 }

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -38,7 +37,7 @@ func main() {
 	var clickhouseDB *db.DB
 	if cfg.EnableClickHouse {
 		var err error
-		clickhouseDB, err = db.InitDB(cfg)
+		clickhouseDB, err = db.InitDB(ctx, cfg)
 		if err != nil {
 			log.Printf("Warning: Failed to initialize ClickHouse DB: %v (running with DB saving disabled)", err)
 		} else {
@@ -50,9 +49,9 @@ func main() {
 
 	var wsHub *hub.Hub
 	if cfg.EnableWebSocket {
-		wsHub = hub.NewHub()
+		wsHub = hub.NewHub(cfg.WsMaxClients)
 		go wsHub.Run()
-		log.Println("WebSocket service is ENABLED")
+		log.Printf("WebSocket service is ENABLED (max clients: %d)", cfg.WsMaxClients)
 	} else {
 		log.Println("WebSocket service is DISABLED in configuration")
 	}
@@ -68,17 +67,6 @@ func main() {
 			http.Error(w, "WebSocket is disabled in configuration", http.StatusServiceUnavailable)
 		})
 	}
-
-	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		status := p.GetStatus()
-		w.Header().Set("Content-Type", "application/json")
-		if status.Status == "error" {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		} else {
-			w.WriteHeader(http.StatusOK)
-		}
-		_ = json.NewEncoder(w).Encode(status)
-	})
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),

@@ -322,7 +322,7 @@ func (c *Client) handleMessage(req *ClientMessage) {
 			Subscriptions: c.listSubscriptionsLocked(),
 		})
 
-	case "unsubscribe", "unsub":
+	case "unsubscribe":
 		removed := 0
 		if req.ID != "" {
 			if _, exists := c.subscriptions[req.ID]; exists {
@@ -343,7 +343,7 @@ func (c *Client) handleMessage(req *ClientMessage) {
 			Subscriptions: c.listSubscriptionsLocked(),
 		})
 
-	case "unsubscribe_all", "clear":
+	case "unsubscribe_all":
 		c.subscriptions = make(map[string]*FilterRule)
 		c.sendJSON(ServerMessage{
 			Type:          "ack",
@@ -417,15 +417,17 @@ type Hub struct {
 	broadcast  chan *adsb.GlobeSnapshot
 	register   chan *Client
 	unregister chan *Client
+	maxClients int
 	mu         sync.RWMutex
 }
 
-func NewHub() *Hub {
+func NewHub(maxClients int) *Hub {
 	return &Hub{
 		clients:    make(map[*Client]bool),
 		broadcast:  make(chan *adsb.GlobeSnapshot, 4),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
+		maxClients: maxClients,
 	}
 }
 
@@ -477,6 +479,11 @@ func (h *Hub) ClientCount() int {
 }
 
 func (h *Hub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+	if h.maxClients > 0 && h.ClientCount() >= h.maxClients {
+		http.Error(w, "Too many connections", http.StatusServiceUnavailable)
+		return
+	}
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("ws upgrade error: %v", err)

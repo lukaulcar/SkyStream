@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	"skystream/pkg/adsb"
@@ -16,23 +16,8 @@ import (
 )
 
 type DB struct {
-	conn          clickhouse.Conn
-	dbName        string
-	mu            sync.RWMutex
-	lastSaveTime  time.Time
-	lastSaveCount int
-	totalSaved    uint64
-	lastError     string
-}
-
-type DBStatus struct {
-	Enabled       bool      `json:"enabled"`
-	Connected     bool      `json:"connected"`
-	Database      string    `json:"database"`
-	LastSaveTime  time.Time `json:"last_save_time,omitempty"`
-	LastSaveCount int       `json:"last_save_count"`
-	TotalSaved    uint64    `json:"total_saved"`
-	LastError     string    `json:"last_error,omitempty"`
+	conn   clickhouse.Conn
+	dbName string
 }
 
 const CreateTableQuery = `
@@ -61,18 +46,36 @@ ORDER BY (icao, timestamp)
 SETTINGS index_granularity = 8192;
 `
 
-func InitDB(cfg *config.Config) (*DB, error) {
-	conn, err := connectClickHouse(cfg, cfg.ClickHouseDB)
+var validDBName = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+
+func InitDB(ctx context.Context, cfg *config.Config) (*DB, error) {
+	if !validDBName.MatchString(cfg.ClickHouseDB) {
+		return nil, fmt.Errorf("invalid database name: %q", cfg.ClickHouseDB)
+	}
+
+	conn, err := connectClickHouse(ctx, cfg, cfg.ClickHouseDB)
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "doesn't exist") ||
-			strings.Contains(strings.ToLower(err.Error()), "database does not exist") {
+		if strings.HasSuffix(strings.ToLower(err.Error()), "does not exist") {
+
 			log.Printf("Database '%s' not found. Connecting to 'default' to create it...", cfg.ClickHouseDB)
-			defaultConn, defErr := connectClickHouse(cfg, "default")
-			if defErr == nil {
-				_ = defaultConn.Exec(context.Background(), fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", cfg.ClickHouseDB))
-				_ = defaultConn.Close()
-				conn, err = connectClickHouse(cfg, cfg.ClickHouseDB)
+
+			defaultConn, defErr := connectClickHouse(ctx, cfg, "default")
+			if defErr != nil {
+				return nil, fmt.Errorf("connect to ClickHouse 'default' db: %w", defErr)
 			}
+
+			createDb := func() error {
+				defer defaultConn.Close()
+				createCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+				return defaultConn.Exec(createCtx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", cfg.ClickHouseDB))
+			}
+
+			if err = createDb(); err != nil {
+				return nil, fmt.Errorf("create database '%s': %w", cfg.ClickHouseDB, err)
+			}
+
+			conn, err = connectClickHouse(ctx, cfg, cfg.ClickHouseDB)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("connect to ClickHouse: %w", err)
@@ -84,14 +87,14 @@ func InitDB(cfg *config.Config) (*DB, error) {
 		dbName: cfg.ClickHouseDB,
 	}
 
-	if err := db.InitPositionsTable(); err != nil {
-		log.Printf("Warning: failed to ensure adsb_positions table: %v", err)
+	if err := db.InitPositionsTable(ctx); err != nil {
+		return nil, fmt.Errorf("Warning: failed to ensure adsb_positions table: %v", err)
 	}
 
 	return db, nil
 }
 
-func connectClickHouse(cfg *config.Config, database string) (clickhouse.Conn, error) {
+func connectClickHouse(ctx context.Context, cfg *config.Config, database string) (clickhouse.Conn, error) {
 	conn, err := clickhouse.Open(&clickhouse.Options{
 		Addr: []string{cfg.ClickHouseAddr},
 		Auth: clickhouse.Auth{
@@ -99,9 +102,8 @@ func connectClickHouse(cfg *config.Config, database string) (clickhouse.Conn, er
 			Username: cfg.ClickHouseUser,
 			Password: cfg.ClickHousePass,
 		},
-		Debug:        false,
-		MaxOpenConns: 20,
-		MaxIdleConns: 5,
+		MaxOpenConns: 5,
+		MaxIdleConns: 1,
 		DialTimeout:  10 * time.Second,
 		ReadTimeout:  60 * time.Second,
 	})
@@ -109,7 +111,7 @@ func connectClickHouse(cfg *config.Config, database string) (clickhouse.Conn, er
 		return nil, err
 	}
 
-	pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if err := conn.Ping(pingCtx); err != nil {
 		_ = conn.Close()
@@ -119,11 +121,11 @@ func connectClickHouse(cfg *config.Config, database string) (clickhouse.Conn, er
 	return conn, nil
 }
 
-func (d *DB) InitPositionsTable() error {
+func (d *DB) InitPositionsTable(ctx context.Context) error {
 	if d.conn == nil {
 		return fmt.Errorf("database connection is nil")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	return d.conn.Exec(ctx, CreateTableQuery)
 }
@@ -138,6 +140,9 @@ func (d *DB) SaveSnapshot(ctx context.Context, snapshot *adsb.GlobeSnapshot, rec
 
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
 		count, err := d.doSaveSnapshot(ctx, snapshot, recordTimes...)
 		if err == nil {
 			return count, nil
@@ -145,18 +150,20 @@ func (d *DB) SaveSnapshot(ctx context.Context, snapshot *adsb.GlobeSnapshot, rec
 		lastErr = err
 		log.Printf("Warning: ClickHouse save attempt %d/3 failed: %v", attempt, err)
 		if attempt < 3 {
-			pingCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			_ = d.conn.Ping(pingCtx)
 			cancel()
+
+			timer := time.NewTimer(time.Duration(attempt) * time.Second)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return 0, ctx.Err()
-			case <-time.After(time.Duration(attempt) * time.Second):
+			case <-timer.C:
 			}
 		}
 	}
 
-	d.recordError(lastErr)
 	return 0, fmt.Errorf("ClickHouse batch save failed after 3 attempts: %w", lastErr)
 }
 
@@ -186,7 +193,6 @@ func (d *DB) doSaveSnapshot(ctx context.Context, snapshot *adsb.GlobeSnapshot, r
 		)
 	`)
 	if err != nil {
-		d.recordError(err)
 		return 0, fmt.Errorf("prepare batch: %w", err)
 	}
 
@@ -253,7 +259,6 @@ func (d *DB) doSaveSnapshot(ctx context.Context, snapshot *adsb.GlobeSnapshot, r
 		)
 		if err != nil {
 			_ = batch.Abort()
-			d.recordError(err)
 			return 0, fmt.Errorf("batch append error: %w", err)
 		}
 		count++
@@ -265,52 +270,10 @@ func (d *DB) doSaveSnapshot(ctx context.Context, snapshot *adsb.GlobeSnapshot, r
 	}
 
 	if err := batch.Send(); err != nil {
-		d.recordError(err)
 		return 0, fmt.Errorf("batch send error: %w", err)
 	}
 
-	d.mu.Lock()
-	d.lastSaveTime = time.Now()
-	d.lastSaveCount = count
-	d.totalSaved += uint64(count)
-	d.lastError = ""
-	d.mu.Unlock()
-
 	return count, nil
-}
-
-func (d *DB) recordError(err error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if err != nil {
-		d.lastError = err.Error()
-	}
-}
-
-func (d *DB) GetStatus() DBStatus {
-	if d == nil {
-		return DBStatus{Enabled: false}
-	}
-
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	connected := false
-	if d.conn != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		connected = d.conn.Ping(ctx) == nil
-	}
-
-	return DBStatus{
-		Enabled:       true,
-		Connected:     connected,
-		Database:      d.dbName,
-		LastSaveTime:  d.lastSaveTime,
-		LastSaveCount: d.lastSaveCount,
-		TotalSaved:    d.totalSaved,
-		LastError:     d.lastError,
-	}
 }
 
 func (d *DB) Close() error {

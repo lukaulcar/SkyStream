@@ -61,11 +61,6 @@ cp .env.example .env
 go run .
 ```
 
-Verify it's up:
-```bash
-curl http://localhost:8080/status
-```
-
 ---
 
 ## Configuration
@@ -74,10 +69,11 @@ Set via `.env` or system environment variables:
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `PORT` | `8080` | HTTP port for `/status` and `/ws` |
+| `PORT` | `8080` | HTTP port for `/ws` |
 | `ADSB_ENDPOINT` | `https://globe.adsbexchange.com/...` | ADS-B Exchange binCraft API endpoint |
 | `ENABLE_WEBSOCKET` | `true` | Enable WebSocket server |
 | `WEBSOCKET_REFRESH_INTERVAL` | `1s` | Polling and broadcast interval for WebSockets |
+| `WEBSOCKET_MAX_CLIENTS` | `1000` | Maximum concurrent WebSocket connections (0 for unlimited) |
 | `ENABLE_CLICKHOUSE` | `true` | Enable periodic database archiving |
 | `CLICKHOUSE_ADDR` | `localhost:9000` | ClickHouse native TCP port |
 | `CLICKHOUSE_DB` | `skystream` | Target database name |
@@ -241,40 +237,6 @@ Whenever the poller fetches new data, matching aircraft are pushed to the client
   ]
 }
 ```
-
----
-
-## Health & Status Endpoint
-
-```bash
-GET /status
-```
-
-Response:
-```json
-{
-  "status": "ok",
-  "uptime_sec": 3612.4,
-  "polls_count": 3612,
-  "last_fetch": "2026-10-17T12:00:00Z",
-  "aircraft_count": 14520,
-  "fetch_interval": "1s",
-  "websocket": {
-    "enabled": true,
-    "active_clients": 12
-  },
-  "clickhouse": {
-    "enabled": true,
-    "connected": true,
-    "database": "skystream",
-    "last_save_time": "2026-10-17T12:00:00Z",
-    "last_save_count": 14510,
-    "total_saved": 870600
-  }
-}
-```
-
----
 
 ## License
 

@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ type Config struct {
 	ADSBEndpoint           string
 	EnableWebSocket        bool
 	WsRefreshInterval      time.Duration
+	WsMaxClients           int
 	EnableClickHouse       bool
 	ClickHouseAddr         string
 	ClickHouseDB           string
@@ -30,7 +32,7 @@ func LoadConfig(envFiles ...string) *Config {
 	loadEnvFile(envFile)
 
 	port := 8080
-	if p := getEnv("PORT", "HTTP_PORT"); p != "" {
+	if p := getEnv("PORT"); p != "" {
 		if val, err := strconv.Atoi(p); err == nil && val > 0 {
 			port = val
 		}
@@ -42,7 +44,13 @@ func LoadConfig(envFiles ...string) *Config {
 	}
 
 	enableWS := parseBool(getEnv("ENABLE_WEBSOCKET"), true)
-	wsInterval := parseDuration(getEnv("WEBSOCKET_REFRESH_INTERVAL", "WS_REFRESH_INTERVAL"), 1*time.Second)
+	wsInterval := parseDuration(getEnv("WEBSOCKET_REFRESH_INTERVAL"), 1*time.Second)
+	wsMaxClients := 1000
+	if mc := getEnv("WEBSOCKET_MAX_CLIENTS"); mc != "" {
+		if val, err := strconv.Atoi(mc); err == nil && val >= 0 {
+			wsMaxClients = val
+		}
+	}
 
 	enableCH := parseBool(getEnv("ENABLE_CLICKHOUSE"), true)
 	chAddr := getEnv("CLICKHOUSE_ADDR")
@@ -62,13 +70,14 @@ func LoadConfig(envFiles ...string) *Config {
 
 	chPass := getEnv("CLICKHOUSE_PASSWORD")
 
-	chSaveInterval := parseDuration(getEnv("CLICKHOUSE_SAVE_INTERVAL", "DB_SAVE_INTERVAL"), 1*time.Minute)
+	chSaveInterval := parseDuration(getEnv("CLICKHOUSE_SAVE_INTERVAL"), 1*time.Minute)
 
 	return &Config{
 		Port:                   port,
 		ADSBEndpoint:           endpoint,
 		EnableWebSocket:        enableWS,
 		WsRefreshInterval:      wsInterval,
+		WsMaxClients:           wsMaxClients,
 		EnableClickHouse:       enableCH,
 		ClickHouseAddr:         chAddr,
 		ClickHouseDB:           chDB,
@@ -111,13 +120,15 @@ func loadEnvFile(path string) {
 			_ = os.Setenv(key, val)
 		}
 	}
+
+	if err = scanner.Err(); err != nil {
+		log.Println(err)
+	}
 }
 
-func getEnv(keys ...string) string {
-	for _, key := range keys {
-		if val := strings.TrimSpace(os.Getenv(key)); val != "" {
-			return val
-		}
+func getEnv(key string) string {
+	if val := strings.TrimSpace(os.Getenv(key)); val != "" {
+		return val
 	}
 	return ""
 }
